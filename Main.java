@@ -1,0 +1,84 @@
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Main {
+
+    public static void main(String[] args) {
+        // Create sampler with default 10-second windows
+        LogTypeSampler sampler = new LogTypeSampler(1000L);
+        String[] logTypes = { "api.request", "db.query", "cache.hit", "error.log" };
+        double[] rates = { 0.1, 0.2, 0.05, 0.3 };
+
+        int numThreads = 8;
+        int eventsPerThread = 500;
+        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch completedLatch = new CountDownLatch(numThreads);
+
+        AtomicInteger[] sampled = new AtomicInteger[logTypes.length];
+        AtomicInteger[] seen = new AtomicInteger[logTypes.length];
+        for (int i = 0; i < logTypes.length; i++) {
+            sampled[i] = new AtomicInteger(0);
+            seen[i] = new AtomicInteger(0);
+        }
+
+        // Launch threads that sample different log types concurrently
+        for (int t = 0; t < numThreads; t++) {
+            final int threadId = t;
+            executor.submit(
+                    () -> {
+                        try {
+                            startLatch.await();
+
+                            for (int i = 0; i < eventsPerThread; i++) {
+                                int logTypeIdx = (threadId + i) % logTypes.length;
+                                seen[logTypeIdx].incrementAndGet();
+                                if (sampler.shouldSample(logTypes[logTypeIdx], rates[logTypeIdx])) {
+                                    sampled[logTypeIdx].incrementAndGet();
+                                }
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        } finally {
+                            completedLatch.countDown();
+                        }
+                    });
+        }
+
+        startLatch.countDown();
+        try {
+            if (!completedLatch.await(30, TimeUnit.SECONDS)) {
+                throw new RuntimeException("Threads did not complete in time");
+            }
+
+            executor.shutdown();
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                throw new RuntimeException("Executor did not terminate in time");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Main thread interrupted", e);
+        }
+
+        for (int i = 0; i < logTypes.length; i++) {
+            double actualRate = (double) sampled[i].get() / seen[i].get();
+            double expectedRate = rates[i];
+            double tolerance = expectedRate * 0.3; // 30% tolerance
+            System.out.println(
+                    String.format(
+                            "Log type %s: expected %.2f%%, actual %.2f%% (seen=%d, sampled=%d)",
+                            logTypes[i], expectedRate * 100, actualRate * 100, seen[i].get(), sampled[i].get()));
+            if (Math.abs(actualRate - expectedRate) > tolerance) {
+                throw new RuntimeException(
+                        String.format(
+                                "Log type %s: expected rate %.2f%%, got %.2f%%",
+                                logTypes[i], expectedRate * 100, actualRate * 100));
+            }
+        }
+
+        System.out.println("Sampling validation passed for all log types.");
+    }
+}
