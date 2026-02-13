@@ -45,6 +45,17 @@ Log type error.log: expected 30.00%, actual 29.47% (seen=160000, sampled=47146)
 Sampling validation passed for all log types.
 ```
 
+## JRuby Demo
+
+Compile the Java classes and run the JRuby stress test:
+
+```zsh
+javac LogTypeSampler.java LogSamplerConfiguration.java
+jruby jruby_demo.rb 32 20000
+```
+
+The script prints per-log-type counts and sample rates.
+
 ## Configuration
 
 Configure per-log-type sample rates and window sizes using
