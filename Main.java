@@ -1,3 +1,5 @@
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -7,13 +9,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class Main {
 
     public static void main(String[] args) {
-        // Create sampler with default 10-second windows
-        LogTypeSampler sampler = new LogTypeSampler(1000L);
         String[] logTypes = { "api.request", "db.query", "cache.hit", "error.log" };
         double[] rates = { 0.1, 0.2, 0.05, 0.3 };
+        long[] windowsMs = { 1000L, 1000L, 1000L, 1000L };
 
-        int numThreads = 8;
-        int eventsPerThread = 500;
+        List<LogSamplerConfiguration> configurations = new ArrayList<>();
+        for (int i = 0; i < logTypes.length; i++) {
+            configurations.add(new LogSamplerConfiguration(logTypes[i], rates[i], windowsMs[i]));
+        }
+
+        LogTypeSampler sampler = new LogTypeSampler(configurations);
+
+        int numThreads = parsePositiveIntArg(args, 0, 8);
+        int eventsPerThread = parsePositiveIntArg(args, 1, 500);
         ExecutorService executor = Executors.newFixedThreadPool(numThreads);
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch completedLatch = new CountDownLatch(numThreads);
@@ -36,7 +44,7 @@ public class Main {
                             for (int i = 0; i < eventsPerThread; i++) {
                                 int logTypeIdx = (threadId + i) % logTypes.length;
                                 seen[logTypeIdx].incrementAndGet();
-                                if (sampler.shouldSample(logTypes[logTypeIdx], rates[logTypeIdx])) {
+                                if (sampler.shouldSample(logTypes[logTypeIdx])) {
                                     sampled[logTypeIdx].incrementAndGet();
                                 }
                             }
@@ -80,5 +88,17 @@ public class Main {
         }
 
         System.out.println("Sampling validation passed for all log types.");
+    }
+
+    private static int parsePositiveIntArg(String[] args, int index, int defaultValue) {
+        if (args == null || args.length <= index) {
+            return defaultValue;
+        }
+        try {
+            int value = Integer.parseInt(args[index]);
+            return value > 0 ? value : defaultValue;
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 }

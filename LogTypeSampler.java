@@ -1,3 +1,7 @@
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -36,15 +40,18 @@ import java.util.concurrent.atomic.AtomicLong;
  * <h3>Usage Example</h3>
  *
  * <pre>{@code
- * // Create sampler with 10-second windows
- * LogTypeSampler sampler = new LogTypeSampler();
+ * List<LogSamplerConfiguration> configs = new ArrayList<>();
+ * configs.add(new LogSamplerConfiguration("api.request", 0.1, 1000L));
+ * configs.add(new LogSamplerConfiguration("db.query", 0.05, 1000L));
+ *
+ * LogTypeSampler sampler = new LogTypeSampler(configs);
  *
  * // In your logging code (called from multiple threads):
- * if (sampler.shouldSample("api.request", 0.1)) { // Sample 10% of API requests
+ * if (sampler.shouldSample("api.request")) { // Sample 10% of API requests
  *     logger.info("API request: {}", request);
  * }
  *
- * if (sampler.shouldSample("db.query", 0.05)) { // Sample 5% of DB queries
+ * if (sampler.shouldSample("db.query")) { // Sample 5% of DB queries
  *     logger.debug("DB query: {}", query);
  * }
  * }</pre>
@@ -60,16 +67,62 @@ import java.util.concurrent.atomic.AtomicLong;
 public class LogTypeSampler {
 
     private static final long DEFAULT_WINDOW_DURATION_MS = 10_000L; // 10 seconds
-    private static final long MIN_WINDOW_DURATION_MS = 1_000L; // 1 second
+    public static final long MIN_WINDOW_DURATION_MS = 1_000L; // 1 second
 
     private final long windowDurationMs;
     private final ConcurrentHashMap<String, WindowState> logTypeStates = new ConcurrentHashMap<>();
+    private final Map<String, Long> windowDurationsByLogType;
+    private final Map<String, Double> sampleRatesByLogType;
 
     /**
      * Creates a LogTypeSampler with the default 10-second window duration.
      */
     public LogTypeSampler() {
         this(DEFAULT_WINDOW_DURATION_MS);
+    }
+
+    /**
+     * Creates a LogTypeSampler with per-log-type configuration.
+     *
+     * @param configurations list of per-log-type configurations
+     * @throws IllegalArgumentException if configurations is null or empty
+     */
+    public LogTypeSampler(List<LogSamplerConfiguration> configurations) {
+        if (configurations == null || configurations.isEmpty()) {
+            throw new IllegalArgumentException("configurations must be non-empty");
+        }
+        Map<String, Long> windowDurations = new HashMap<>();
+        Map<String, Double> sampleRates = new HashMap<>();
+        for (LogSamplerConfiguration config : configurations) {
+            if (config == null) {
+                throw new IllegalArgumentException("configurations must not contain null entries");
+            }
+            windowDurations.put(config.logType, config.windowSizeMs);
+            sampleRates.put(config.logType, config.sampleRate);
+        }
+        this.windowDurationsByLogType = Collections.unmodifiableMap(new HashMap<>(windowDurations));
+        this.sampleRatesByLogType = Collections.unmodifiableMap(new HashMap<>(sampleRates));
+        this.windowDurationMs = DEFAULT_WINDOW_DURATION_MS;
+    }
+
+    /**
+     * Determines whether a log of the given type should be sampled using the
+     * configured sample rate for that log type.
+     *
+     * @param logType the type/category of the log
+     * @return true if this log should be sampled, false otherwise
+     * @throws IllegalArgumentException if no sample rate configured for logType
+     */
+    public boolean shouldSample(String logType) {
+        if (logType == null) {
+            throw new IllegalArgumentException("logType cannot be null");
+        }
+        Double targetRate = sampleRatesByLogType.get(logType);
+        if (targetRate == null) {
+            throw new IllegalArgumentException(
+                    "No sample rate configured for log type: " + logType);
+        }
+        return shouldSample(logType, targetRate);
     }
 
     /**
@@ -84,6 +137,8 @@ public class LogTypeSampler {
                     "windowDurationMs must be >= " + MIN_WINDOW_DURATION_MS + " ms");
         }
         this.windowDurationMs = windowDurationMs;
+        this.windowDurationsByLogType = Collections.emptyMap();
+        this.sampleRatesByLogType = Collections.emptyMap();
     }
 
     /**
@@ -122,16 +177,20 @@ public class LogTypeSampler {
                     "targetSampleRate must be in [0.0, 1.0], got: " + targetSampleRate);
         }
 
+        long logTypeWindowDurationMs = resolveWindowDurationMs(logType);
+
         // Get or create window state for this log type
-        WindowState state = logTypeStates.computeIfAbsent(logType, k -> new WindowState(windowDurationMs));
+        WindowState state = logTypeStates.computeIfAbsent(
+                logType,
+                k -> new WindowState(logTypeWindowDurationMs));
 
         long currentTimeMs = System.currentTimeMillis();
         long currentWindowStart = state.windowStartMs.get();
 
         // Check if we need to advance to a new window
-        if (currentTimeMs >= currentWindowStart + windowDurationMs) {
+        if (currentTimeMs >= currentWindowStart + state.windowDurationMs) {
             // Try to reset the window atomically
-            long newWindowStart = (currentTimeMs / windowDurationMs) * windowDurationMs;
+            long newWindowStart = (currentTimeMs / state.windowDurationMs) * state.windowDurationMs;
             if (state.windowStartMs.compareAndSet(currentWindowStart, newWindowStart)) {
                 // Successfully reset window - reset counters
                 state.totalSeen.set(0);
@@ -230,15 +289,29 @@ public class LogTypeSampler {
         return windowDurationMs;
     }
 
+    private long resolveWindowDurationMs(String logType) {
+        if (!windowDurationsByLogType.isEmpty()) {
+            Long duration = windowDurationsByLogType.get(logType);
+            if (duration == null) {
+                throw new IllegalArgumentException(
+                        "No window duration configured for log type: " + logType);
+            }
+            return duration;
+        }
+        return windowDurationMs;
+    }
+
     /**
      * Internal state for tracking a single log type's window.
      */
     private static class WindowState {
+        final long windowDurationMs;
         final AtomicLong windowStartMs;
         final AtomicInteger totalSeen;
         final AtomicInteger totalSampled;
 
         WindowState(long windowDurationMs) {
+            this.windowDurationMs = windowDurationMs;
             long currentTimeMs = System.currentTimeMillis();
             // Align window start to window boundaries
             this.windowStartMs = new AtomicLong((currentTimeMs / windowDurationMs) * windowDurationMs);
